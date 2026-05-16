@@ -1,21 +1,11 @@
 """
 CaixaScraper — Imóveis retomados e leilões da Caixa Econômica Federal.
-
-Fonte: https://venda-imoveis.caixa.gov.br
-API pública da Caixa (usa endpoint JSON não documentado).
-
-Campos extraídos:
-  - Endereço, bairro, cidade, UF
-  - Área, quartos, vagas
-  - Valor avaliado, valor mínimo de venda
-  - Modalidade (licitação, venda direta, leilão)
-  - Status de ocupação
-  - Link do edital (PDF)
+Fonte: https://venda-imoveis.caixa.gov.br/listaweb/Lista_imoveis_{UF}.csv
 """
 
-import re
+import csv
+import io
 from typing import List, Optional
-from urllib.parse import urlencode
 
 import httpx
 
@@ -26,12 +16,9 @@ from app.services.scrapers.base import BaseScraper, BlockedError
 
 settings = get_settings()
 
+CAIXA_CSV_URL = "https://venda-imoveis.caixa.gov.br/listaweb/Lista_imoveis_{uf}.csv"
+CAIXA_DETAIL_URL = "https://venda-imoveis.caixa.gov.br/sistema/detalhe-imovel.asp?hdnimovel={codigo}"
 
-# Endpoint da API da Caixa (descoberto via análise do tráfego do site)
-CAIXA_API_BASE = "https://venda-imoveis.caixa.gov.br/listaweb/Lista_imoveis_{uf}.json"
-CAIXA_DETAIL_URL = "https://venda-imoveis.caixa.gov.br/sistema/detalhe-imovel.asp?hdnOrigem=index&hdnimovel={codigo}"
-
-# Estados alvo (começando pelo RJ para o MVP)
 TARGET_UFS = ["RJ"]
 
 
@@ -50,7 +37,7 @@ class CaixaScraper(BaseScraper):
             timeout=30.0,
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "application/json, text/plain, */*",
+                "Accept": "*/*",
                 "Referer": "https://venda-imoveis.caixa.gov.br/",
             },
             follow_redirects=True,
@@ -68,180 +55,152 @@ class CaixaScraper(BaseScraper):
         return all_properties
 
     async def _scrape_uf(self, client: httpx.AsyncClient, uf: str) -> List[dict]:
-        url = CAIXA_API_BASE.format(uf=uf)
-        logger.debug(f"[Caixa] Buscando: {url}")
+        url = CAIXA_CSV_URL.format(uf=uf)
+        logger.debug(f"[Caixa] Baixando CSV: {url}")
 
-        try:
-            response = await client.get(url)
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 403:
-                raise BlockedError(f"Caixa bloqueou a requisição para {uf}")
-            raise
+        response = await client.get(url)
+        if response.status_code == 403:
+            raise BlockedError(f"Caixa bloqueou {uf}")
+        response.raise_for_status()
 
-        # A Caixa retorna um JSON às vezes com BOM ou encoding diferente
-        text = response.text.lstrip("\ufeff")
+        # Remove BOM e decodifica
+        text = response.content.decode("utf-8-sig", errors="replace")
+        return self._parse_csv(text, uf)
 
-        try:
-            data = response.json() if response.headers.get("content-type", "").startswith("application/json") \
-                else __import__("json").loads(text)
-        except Exception:
-            logger.warning(f"[Caixa/{uf}] Resposta não é JSON válido, tentando parse alternativo")
-            return self._parse_csv_fallback(text, uf)
+    def _parse_csv(self, text: str, uf: str) -> List[dict]:
+        results = []
+        lines = text.strip().split("\n")
 
-        if not data:
+        # Linha 0: título, Linha 1: cabeçalho, Linha 2+: dados
+        if len(lines) < 3:
             return []
 
-        # O JSON da Caixa é uma lista de registros
-        properties = []
-        for item in data if isinstance(data, list) else data.get("imoveis", []):
-            parsed = self._parse_item(item, uf)
+        # Detecta separador
+        header_line = lines[1]
+        sep = ";" if header_line.count(";") > header_line.count(",") else ","
+
+        reader = csv.DictReader(
+            io.StringIO("\n".join(lines[1:])),
+            delimiter=sep,
+        )
+
+        for row in reader:
+            parsed = self._parse_row(row, uf)
             if parsed:
-                properties.append(parsed)
+                results.append(parsed)
 
-        return properties
+        return results
 
-    def _parse_item(self, item: dict, uf: str) -> Optional[dict]:
-        """Normaliza um item do JSON da Caixa para o schema padrão."""
+    def _parse_row(self, row: dict, uf: str) -> Optional[dict]:
         try:
-            # Campos variam conforme a versão do JSON da Caixa
-            # Tentamos múltiplos nomes de campo
-            codigo = (
-                item.get("NUMERO_IMOVEL") or item.get("codigo") or
-                item.get("id") or item.get("NumeroImovel", "")
-            )
-            address = (
-                item.get("LOGRADOURO") or item.get("logradouro") or
-                item.get("Endereco", "")
-            )
-            neighborhood = (
-                item.get("BAIRRO") or item.get("bairro") or
-                item.get("Bairro", "")
-            )
-            city = item.get("MUNICIPIO") or item.get("municipio") or item.get("Cidade", "")
-            
-            price_raw = (
-                item.get("PRECO") or item.get("preco") or
-                item.get("ValorVenda") or item.get("valor_venda", "")
-            )
-            appraised_raw = (
-                item.get("VALOR_AVALIACAO") or item.get("valor_avaliacao") or
-                item.get("ValorAvaliacao", "")
-            )
-            area_raw = (
-                item.get("AREA_TOTAL") or item.get("area_total") or
-                item.get("AreaTotal") or item.get("area", "")
-            )
-            bedrooms_raw = (
-                item.get("NUMERO_QUARTOS") or item.get("quartos") or
-                item.get("NumeroQuartos", 0)
-            )
-            modality = (
-                item.get("MODALIDADE_VENDA") or item.get("modalidade") or
-                item.get("TipoVenda", "")
-            )
-            occupation_raw = (
-                item.get("DESCRICAO_OCUPACAO") or item.get("ocupacao") or
-                item.get("Ocupacao", "")
-            )
-            property_type_raw = (
-                item.get("TIPO_IMOVEL") or item.get("tipo") or
-                item.get("TipoImovel", "")
-            )
-            edital_url = item.get("LINK_EDITAL") or item.get("link_edital") or ""
+            # Normaliza chaves (remove espaços e BOM)
+            row = {k.strip().lstrip("\ufeff"): v.strip() for k, v in row.items() if k}
 
-            asking_price = self._parse_price(str(price_raw))
-            appraised_value = self._parse_price(str(appraised_raw))
-            total_area = self._parse_area(str(area_raw))
+            codigo = row.get("N° do imóvel", "").strip()
+            city = row.get("Cidade", "").strip().title()
+            neighborhood = row.get("Bairro", "").strip().title()
+            address = row.get("Endereço", "").strip().title()
+            price_raw = row.get("Preço", "")
+            appraised_raw = row.get("Valor de avaliação", "")
+            desconto_raw = row.get("Desconto", "0")
+            descricao = row.get("Descrição", "")
+            modalidade = row.get("Modalidade de venda", "")
+            link = row.get("Link de acesso", "")
+            financiamento = row.get("Financiamento", "")
 
-            # Mínimo necessário: ter preço ou valor de avaliação
+            asking_price = self._parse_price(price_raw)
+            appraised_value = self._parse_price(appraised_raw)
+
             if not asking_price and not appraised_value:
                 return None
 
-            # Para leilão, o preço mínimo pode ser o asking ou um desconto do avaliado
-            min_bid = asking_price or (appraised_value * 0.6 if appraised_value else None)
+            # Extrai área e quartos da descrição
+            total_area = self._extract_area(descricao)
+            bedrooms = self._extract_bedrooms(descricao)
+            property_type = self._extract_property_type(descricao)
 
             return {
                 "source": PropertySource.CAIXA,
-                "external_id": str(codigo) if codigo else None,
-                "source_url": CAIXA_DETAIL_URL.format(codigo=codigo) if codigo else None,
+                "external_id": codigo,
+                "source_url": link or CAIXA_DETAIL_URL.format(codigo=codigo),
+                "title": f"{property_type.title()} - {neighborhood}, {city}",
+                "description": descricao,
+                "property_type": self._parse_property_type(property_type),
                 "address": address,
                 "neighborhood": neighborhood,
-                "city": city or "Rio de Janeiro",
+                "city": city,
                 "state": uf,
                 "total_area": total_area,
-                "usable_area": total_area,  # Caixa não separa área útil
-                "bedrooms": int(bedrooms_raw) if bedrooms_raw else None,
+                "usable_area": total_area,
+                "bedrooms": bedrooms,
                 "asking_price": asking_price,
                 "appraised_value": appraised_value,
-                "min_bid": min_bid,
-                "auction_type": self._parse_auction_type(str(modality)),
-                "occupation_status": self._parse_occupation(str(occupation_raw)),
-                "property_type": self._parse_property_type(str(property_type_raw)),
+                "min_bid": asking_price,
+                "auction_type": self._parse_auction_type(modalidade),
+                "occupation_status": OccupationStatus.INDEFINIDO,
                 "extra_data": {
-                    "modalidade": modality,
-                    "edital_url": edital_url,
-                    "raw": item,
+                    "modalidade": modalidade,
+                    "financiamento": financiamento,
+                    "desconto_caixa": desconto_raw,
+                    "edital_url": link,
                 },
             }
         except Exception as e:
-            logger.warning(f"[Caixa] Erro ao parsear item: {e} | item={item}")
+            logger.debug(f"[Caixa] Erro ao parsear linha: {e}")
             return None
 
-    def _parse_auction_type(self, modality: str) -> AuctionType:
-        m = modality.lower()
-        if "1" in m and "leilão" in m or "primeiro" in m:
-            return AuctionType.PRIMEIRO_LEILAO
-        if "2" in m and "leilão" in m or "segundo" in m:
+    def _extract_area(self, descricao: str) -> Optional[float]:
+        import re
+        match = re.search(r"([\d.,]+)\s*de\s*área\s*(total|privativa|útil)", descricao, re.IGNORECASE)
+        if match:
+            return self._parse_area(match.group(1))
+        match = re.search(r"([\d.,]+)\s*m²", descricao, re.IGNORECASE)
+        if match:
+            return self._parse_area(match.group(1))
+        return None
+
+    def _extract_bedrooms(self, descricao: str) -> Optional[int]:
+        import re
+        match = re.search(r"(\d+)\s*qto", descricao, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _extract_property_type(self, descricao: str) -> str:
+        d = descricao.lower()
+        if "apart" in d or "ap," in d:
+            return "apartamento"
+        if "casa" in d:
+            return "casa"
+        if "terreno" in d or "lote" in d:
+            return "terreno"
+        if "cobertura" in d:
+            return "cobertura"
+        if "comercial" in d or "sala" in d or "loja" in d:
+            return "comercial"
+        return "apartamento"
+
+    def _parse_auction_type(self, modalidade: str) -> AuctionType:
+        m = modalidade.lower()
+        if "2" in m and "leilão" in m:
             return AuctionType.SEGUNDO_LEILAO
-        if "venda direta" in m or "licitação" in m:
+        if "leilão" in m or "licitação" in m or "sfi" in m:
+            return AuctionType.PRIMEIRO_LEILAO
+        if "venda direta" in m or "venda online" in m:
             return AuctionType.VENDA_DIRETA
-        return AuctionType.VENDA_DIRETA  # Default Caixa
+        return AuctionType.VENDA_DIRETA
 
-    def _parse_occupation(self, raw: str) -> OccupationStatus:
-        r = raw.lower()
-        if "desocup" in r or "vago" in r or "livre" in r:
-            return OccupationStatus.DESOCUPADO
-        if "ocupado" in r or "ocupad" in r:
-            return OccupationStatus.OCUPADO
-        return OccupationStatus.INDEFINIDO
-
-    def _parse_property_type(self, raw: str) -> str:
+    def _parse_property_type(self, raw: str):
         from app.models.property import PropertyType
         r = raw.lower()
-        if "apart" in r or "ap " in r:
+        if "apart" in r:
             return PropertyType.APARTAMENTO
-        if "casa" in r or "resid" in r:
+        if "casa" in r:
             return PropertyType.CASA
         if "terreno" in r or "lote" in r:
             return PropertyType.TERRENO
         if "cobertura" in r:
             return PropertyType.COBERTURA
-        if "comercial" in r or "sala" in r or "loja" in r:
+        if "comercial" in r:
             return PropertyType.COMERCIAL
         return PropertyType.APARTAMENTO
-
-    def _parse_csv_fallback(self, text: str, uf: str) -> List[dict]:
-        """
-        Fallback: a Caixa às vezes retorna CSV em vez de JSON.
-        """
-        logger.info(f"[Caixa/{uf}] Tentando parse CSV...")
-        lines = text.strip().split("\n")
-        if len(lines) < 2:
-            return []
-
-        # Tenta detectar separador
-        sep = ";" if ";" in lines[0] else ","
-        headers = [h.strip().strip('"') for h in lines[0].split(sep)]
-
-        results = []
-        for line in lines[1:]:
-            values = [v.strip().strip('"') for v in line.split(sep)]
-            if len(values) != len(headers):
-                continue
-            item = dict(zip(headers, values))
-            parsed = self._parse_item(item, uf)
-            if parsed:
-                results.append(parsed)
-
-        return results
