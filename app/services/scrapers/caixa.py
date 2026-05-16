@@ -1,17 +1,18 @@
 """
-CaixaScraper — Imóveis retomados e leilões da Caixa Econômica Federal.
+CaixaScraper — Imoveis retomados e leiloes da Caixa Economica Federal.
 Fonte: https://venda-imoveis.caixa.gov.br/listaweb/Lista_imoveis_{UF}.csv
 """
 
 import csv
 import io
+import re
 from typing import List, Optional
 
 import httpx
 
 from app.core.config import get_settings
 from app.core.logger import logger
-from app.models.property import PropertySource, AuctionType, OccupationStatus
+from app.models.property import PropertySource, AuctionType, OccupationStatus, PropertyType
 from app.services.scrapers.base import BaseScraper, BlockedError
 
 settings = get_settings()
@@ -46,7 +47,7 @@ class CaixaScraper(BaseScraper):
                 try:
                     props = await self._scrape_uf(client, uf)
                     all_properties.extend(props)
-                    logger.info(f"[Caixa/{uf}] {len(props)} imóveis encontrados")
+                    logger.info(f"[Caixa/{uf}] {len(props)} imoveis encontrados")
                     await self._random_delay()
                 except Exception as e:
                     logger.error(f"[Caixa/{uf}] Erro: {e}")
@@ -63,57 +64,51 @@ class CaixaScraper(BaseScraper):
             raise BlockedError(f"Caixa bloqueou {uf}")
         response.raise_for_status()
 
-        # Remove BOM e decodifica
         text = response.content.decode("utf-8-sig", errors="replace")
         return self._parse_csv(text, uf)
 
     def _parse_csv(self, text: str, uf: str) -> List[dict]:
-    results = []
-    lines = [l for l in text.split("\n") if l.strip()]  # Remove linhas vazias
+        results = []
+        lines = [l for l in text.split("\n") if l.strip()]
 
-    if len(lines) < 2:
-        return []
+        if len(lines) < 2:
+            return []
 
-    # Linha 0: título, Linha 1: cabeçalho, Linha 2+: dados
-    sep = ";" if lines[1].count(";") > lines[1].count(",") else ","
+        sep = ";" if lines[1].count(";") > lines[1].count(",") else ","
 
-    reader = csv.DictReader(
-        io.StringIO("\n".join(lines[1:])),
-        delimiter=sep,
-    )
+        reader = csv.DictReader(
+            io.StringIO("\n".join(lines[1:])),
+            delimiter=sep,
+        )
 
-    for row in reader:
-        parsed = self._parse_row(row, uf)
-        if parsed:
-            results.append(parsed)
+        for row in reader:
+            parsed = self._parse_row(row, uf)
+            if parsed:
+                results.append(parsed)
 
-    return results
+        return results
 
     def _parse_row(self, row: dict, uf: str) -> Optional[dict]:
         try:
-            # Normaliza chaves — remove espaços, BOM e caracteres especiais
             clean = {}
             for k, v in row.items():
                 if k is None:
                     continue
-                key = k.strip().lstrip("\ufeff")
-                # Mapeia independente de encoding
-                key_lower = key.lower()
-                clean[key_lower] = v.strip() if v else ""
+                key = k.strip().lstrip("\ufeff").lower()
+                clean[key] = v.strip() if v else ""
 
-            # Busca campos por substring para ser robusto ao encoding
             def get(partial):
                 for k, v in clean.items():
                     if partial.lower() in k:
                         return v
                 return ""
 
-            codigo = get("vel")  # imóvel
+            codigo = get("vel")
             city = get("cidade").strip().title()
             neighborhood = get("bairro").strip().title()
             address = get("ender").strip().title()
-            price_raw = get("pre")  # preço
-            appraised_raw = get("avali")  # avaliação
+            price_raw = get("pre")
+            appraised_raw = get("avali")
             desconto_raw = get("desconto")
             descricao = get("descri")
             modalidade = get("modalidade")
@@ -161,17 +156,15 @@ class CaixaScraper(BaseScraper):
             return None
 
     def _extract_area(self, descricao: str) -> Optional[float]:
-        import re
-        match = re.search(r"([\d.,]+)\s*de\s*área\s*(total|privativa|útil)", descricao, re.IGNORECASE)
+        match = re.search(r"([\d.,]+)\s*de\s*area\s*(total|privativa|util)", descricao, re.IGNORECASE)
         if match:
             return self._parse_area(match.group(1))
-        match = re.search(r"([\d.,]+)\s*m²", descricao, re.IGNORECASE)
+        match = re.search(r"([\d.,]+)\s*m", descricao, re.IGNORECASE)
         if match:
             return self._parse_area(match.group(1))
         return None
 
     def _extract_bedrooms(self, descricao: str) -> Optional[int]:
-        import re
         match = re.search(r"(\d+)\s*qto", descricao, re.IGNORECASE)
         if match:
             return int(match.group(1))
@@ -179,7 +172,7 @@ class CaixaScraper(BaseScraper):
 
     def _extract_property_type(self, descricao: str) -> str:
         d = descricao.lower()
-        if "apart" in d or "ap," in d:
+        if "apart" in d:
             return "apartamento"
         if "casa" in d:
             return "casa"
@@ -193,16 +186,15 @@ class CaixaScraper(BaseScraper):
 
     def _parse_auction_type(self, modalidade: str) -> AuctionType:
         m = modalidade.lower()
-        if "2" in m and "leilão" in m:
+        if "2" in m and "leil" in m:
             return AuctionType.SEGUNDO_LEILAO
-        if "leilão" in m or "licitação" in m or "sfi" in m:
+        if "leil" in m or "licit" in m or "sfi" in m:
             return AuctionType.PRIMEIRO_LEILAO
         if "venda direta" in m or "venda online" in m:
             return AuctionType.VENDA_DIRETA
         return AuctionType.VENDA_DIRETA
 
-    def _parse_property_type(self, raw: str):
-        from app.models.property import PropertyType
+    def _parse_property_type(self, raw: str) -> PropertyType:
         r = raw.lower()
         if "apart" in r:
             return PropertyType.APARTAMENTO
