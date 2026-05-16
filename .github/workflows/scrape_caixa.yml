@@ -1,0 +1,61 @@
+name: Scraping Caixa Diário
+
+on:
+  schedule:
+    - cron: '0 9 * * *'  # Todo dia às 6h horário de Brasília (9h UTC)
+  workflow_dispatch:       # Permite rodar manualmente pelo GitHub
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar CSV da Caixa
+        run: |
+          curl -L -o caixa_rj.csv \
+            "https://venda-imoveis.caixa.gov.br/listaweb/Lista_imoveis_RJ.csv"
+          echo "Linhas: $(wc -l < caixa_rj.csv)"
+
+      - name: Instalar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Instalar requests
+        run: pip install requests
+
+      - name: Importar para API
+        env:
+          API_URL: ${{ secrets.API_URL }}
+        run: |
+          python -c "
+          import requests, os
+
+          url = os.environ['API_URL'] + '/api/v1/import/caixa'
+
+          with open('caixa_rj.csv', 'r', encoding='utf-8-sig', errors='replace') as f:
+              lines = f.readlines()
+
+          header = lines[0:2]
+          total = 0
+
+          for i in range(2, len(lines), 500):
+              chunk = ''.join(header + lines[i:i+500])
+              r = requests.post(
+                  url,
+                  files={'file': ('caixa.csv', chunk.encode('utf-8'), 'text/csv')},
+                  timeout=60
+              )
+              data = r.json()
+              imported = data.get('imported', 0)
+              total += imported
+              print(f'Parte {i//500+1}: {imported} imoveis')
+
+          print(f'TOTAL: {total} imoveis importados')
+          "
+
+      - name: Disparar análise
+        env:
+          API_URL: ${{ secrets.API_URL }}
+        run: |
+          curl -X POST "${{ secrets.API_URL }}/api/v1/scrape/pipeline"
