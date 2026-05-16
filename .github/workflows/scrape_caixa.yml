@@ -17,7 +17,7 @@ jobs:
           echo "Linhas: $(wc -l < caixa_rj.csv)"
 
       - name: Instalar Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -29,14 +29,18 @@ jobs:
           API_URL: ${{ secrets.API_URL }}
         run: |
           python << 'EOF'
-          import requests, os
+          import requests, os, time
 
           url = os.environ['API_URL'] + '/api/v1/import/caixa'
+          print(f"Enviando para: {url}")
 
           with open('caixa_rj.csv', 'r', encoding='utf-8-sig', errors='replace') as f:
               lines = f.readlines()
 
-          print(f"Total linhas: {len(lines)}")
+          # Remove linhas vazias
+          lines = [l for l in lines if l.strip()]
+          print(f"Total linhas validas: {len(lines)}")
+
           header = lines[0:2]
           total = 0
           parte = 1
@@ -49,13 +53,17 @@ jobs:
                       files={'file': ('caixa.csv', chunk.encode('utf-8'), 'text/csv')},
                       timeout=60
                   )
-                  data = r.json()
-                  imported = data.get('imported', 0)
-                  total += imported
-                  print(f"Parte {parte}: {imported} imoveis novos")
+                  if r.status_code == 200:
+                      data = r.json()
+                      imported = data.get('imported', 0)
+                      total += imported
+                      print(f"Parte {parte}: {imported} imoveis novos")
+                  else:
+                      print(f"Parte {parte} erro HTTP {r.status_code}: {r.text[:200]}")
               except Exception as e:
-                  print(f"Parte {parte} erro: {e}")
+                  print(f"Parte {parte} excecao: {e}")
               parte += 1
+              time.sleep(0.5)
 
           print(f"TOTAL IMPORTADO: {total} imoveis")
           EOF
@@ -64,5 +72,6 @@ jobs:
         env:
           API_URL: ${{ secrets.API_URL }}
         run: |
-          curl -X POST "$API_URL/api/v1/scrape/pipeline"
+          curl -s -X POST "$API_URL/api/v1/scrape/pipeline"
+          echo ""
           echo "Pipeline disparado!"
