@@ -1,4 +1,4 @@
-name: Scraping Caixa Diario
+﻿name: Scraping Caixa Diario
 
 on:
   schedule:
@@ -10,10 +10,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Baixar CSV da Caixa
         run: |
-          curl -L -o caixa_rj.csv \
-            "https://venda-imoveis.caixa.gov.br/listaweb/Lista_imoveis_RJ.csv"
+          curl -L -o caixa_rj.csv "https://venda-imoveis.caixa.gov.br/listaweb/Lista_imoveis_RJ.csv"
           echo "Linhas: $(wc -l < caixa_rj.csv)"
 
       - name: Instalar Python
@@ -24,54 +26,14 @@ jobs:
       - name: Instalar requests
         run: pip install requests
 
-      - name: Importar para API em partes
+      - name: Importar para API
         env:
           API_URL: ${{ secrets.API_URL }}
-        run: |
-          python << 'EOF'
-          import requests, os, time
-
-          url = os.environ['API_URL'] + '/api/v1/import/caixa'
-          print(f"Enviando para: {url}")
-
-          with open('caixa_rj.csv', 'r', encoding='utf-8-sig', errors='replace') as f:
-              lines = f.readlines()
-
-          # Remove linhas vazias
-          lines = [l for l in lines if l.strip()]
-          print(f"Total linhas validas: {len(lines)}")
-
-          header = lines[0:2]
-          total = 0
-          parte = 1
-
-          for i in range(2, len(lines), 500):
-              chunk = ''.join(header + lines[i:i+500])
-              try:
-                  r = requests.post(
-                      url,
-                      files={'file': ('caixa.csv', chunk.encode('utf-8'), 'text/csv')},
-                      timeout=60
-                  )
-                  if r.status_code == 200:
-                      data = r.json()
-                      imported = data.get('imported', 0)
-                      total += imported
-                      print(f"Parte {parte}: {imported} imoveis novos")
-                  else:
-                      print(f"Parte {parte} erro HTTP {r.status_code}: {r.text[:200]}")
-              except Exception as e:
-                  print(f"Parte {parte} excecao: {e}")
-              parte += 1
-              time.sleep(0.5)
-
-          print(f"TOTAL IMPORTADO: {total} imoveis")
-          EOF
+        run: python scripts/importar_caixa.py
 
       - name: Disparar analise
         env:
           API_URL: ${{ secrets.API_URL }}
         run: |
           curl -s -X POST "$API_URL/api/v1/scrape/pipeline"
-          echo ""
           echo "Pipeline disparado!"
