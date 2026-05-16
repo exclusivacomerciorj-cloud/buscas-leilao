@@ -93,20 +93,34 @@ class CaixaScraper(BaseScraper):
 
     def _parse_row(self, row: dict, uf: str) -> Optional[dict]:
         try:
-            # Normaliza chaves (remove espaços e BOM)
-            row = {k.strip().lstrip("\ufeff"): v.strip() for k, v in row.items() if k}
+            # Normaliza chaves — remove espaços, BOM e caracteres especiais
+            clean = {}
+            for k, v in row.items():
+                if k is None:
+                    continue
+                key = k.strip().lstrip("\ufeff")
+                # Mapeia independente de encoding
+                key_lower = key.lower()
+                clean[key_lower] = v.strip() if v else ""
 
-            codigo = row.get("N° do imóvel", "").strip()
-            city = row.get("Cidade", "").strip().title()
-            neighborhood = row.get("Bairro", "").strip().title()
-            address = row.get("Endereço", "").strip().title()
-            price_raw = row.get("Preço", "")
-            appraised_raw = row.get("Valor de avaliação", "")
-            desconto_raw = row.get("Desconto", "0")
-            descricao = row.get("Descrição", "")
-            modalidade = row.get("Modalidade de venda", "")
-            link = row.get("Link de acesso", "")
-            financiamento = row.get("Financiamento", "")
+            # Busca campos por substring para ser robusto ao encoding
+            def get(partial):
+                for k, v in clean.items():
+                    if partial.lower() in k:
+                        return v
+                return ""
+
+            codigo = get("vel")  # imóvel
+            city = get("cidade").strip().title()
+            neighborhood = get("bairro").strip().title()
+            address = get("ender").strip().title()
+            price_raw = get("pre")  # preço
+            appraised_raw = get("avali")  # avaliação
+            desconto_raw = get("desconto")
+            descricao = get("descri")
+            modalidade = get("modalidade")
+            link = get("link")
+            financiamento = get("financ")
 
             asking_price = self._parse_price(price_raw)
             appraised_value = self._parse_price(appraised_raw)
@@ -114,7 +128,6 @@ class CaixaScraper(BaseScraper):
             if not asking_price and not appraised_value:
                 return None
 
-            # Extrai área e quartos da descrição
             total_area = self._extract_area(descricao)
             bedrooms = self._extract_bedrooms(descricao)
             property_type = self._extract_property_type(descricao)
