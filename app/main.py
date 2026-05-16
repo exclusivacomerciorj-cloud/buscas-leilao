@@ -22,7 +22,7 @@ Endpoints:
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Query, Response
+from fastapi import FastAPI, Depends, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
@@ -363,7 +363,52 @@ def get_stats(db: Session = Depends(get_db)):
         "by_source": {s.value: c for s, c in by_source},
     }
 
+@app.post("/api/v1/import/caixa", tags=["scraping"])
+async def import_caixa_csv(
+    file: UploadFile,
+    db: Session = Depends(get_db),
+):
+    """Importa CSV da Caixa enviado localmente."""
+    from app.services.scrapers.caixa import CaixaScraper
+    from app.models.property import ScrapeLog
+    from datetime import datetime
 
+    content = await file.read()
+    text = content.decode("utf-8-sig", errors="replace")
+
+    scraper = CaixaScraper()
+    raw_properties = scraper._parse_csv(text, "RJ")
+
+    new_count = 0
+    for data in raw_properties:
+        external_id = data.get("external_id")
+        existing = None
+        if external_id:
+            existing = db.query(Property).filter(
+                Property.external_id == external_id,
+                Property.source == PropertySource.CAIXA,
+            ).first()
+        if not existing:
+            prop = Property(**{
+                k: v for k, v in data.items()
+                if hasattr(Property, k) and k not in ("id",)
+            })
+            db.add(prop)
+            new_count += 1
+
+    log = ScrapeLog(
+        source=PropertySource.CAIXA,
+        started_at=datetime.utcnow(),
+        finished_at=datetime.utcnow(),
+        total_found=len(raw_properties),
+        new_properties=new_count,
+        success=True,
+    )
+    db.add(log)
+    db.commit()
+
+    return {"imported": new_count, "total_found": len(raw_properties)}
+    
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _serialize_property(prop: Property, analysis: Optional[PropertyAnalysis]) -> dict:
