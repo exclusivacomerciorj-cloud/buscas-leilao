@@ -1,9 +1,9 @@
-name: Scraping Caixa Diário
+name: Scraping Caixa Diario
 
 on:
   schedule:
-    - cron: '0 9 * * *'  # Todo dia às 6h horário de Brasília (9h UTC)
-  workflow_dispatch:       # Permite rodar manualmente pelo GitHub
+    - cron: '0 9 * * *'
+  workflow_dispatch:
 
 jobs:
   scrape:
@@ -24,11 +24,11 @@ jobs:
       - name: Instalar requests
         run: pip install requests
 
-      - name: Importar para API
+      - name: Importar para API em partes
         env:
           API_URL: ${{ secrets.API_URL }}
         run: |
-          python -c "
+          python << 'EOF'
           import requests, os
 
           url = os.environ['API_URL'] + '/api/v1/import/caixa'
@@ -36,26 +36,33 @@ jobs:
           with open('caixa_rj.csv', 'r', encoding='utf-8-sig', errors='replace') as f:
               lines = f.readlines()
 
+          print(f"Total linhas: {len(lines)}")
           header = lines[0:2]
           total = 0
+          parte = 1
 
           for i in range(2, len(lines), 500):
               chunk = ''.join(header + lines[i:i+500])
-              r = requests.post(
-                  url,
-                  files={'file': ('caixa.csv', chunk.encode('utf-8'), 'text/csv')},
-                  timeout=60
-              )
-              data = r.json()
-              imported = data.get('imported', 0)
-              total += imported
-              print(f'Parte {i//500+1}: {imported} imoveis')
+              try:
+                  r = requests.post(
+                      url,
+                      files={'file': ('caixa.csv', chunk.encode('utf-8'), 'text/csv')},
+                      timeout=60
+                  )
+                  data = r.json()
+                  imported = data.get('imported', 0)
+                  total += imported
+                  print(f"Parte {parte}: {imported} imoveis novos")
+              except Exception as e:
+                  print(f"Parte {parte} erro: {e}")
+              parte += 1
 
-          print(f'TOTAL: {total} imoveis importados')
-          "
+          print(f"TOTAL IMPORTADO: {total} imoveis")
+          EOF
 
-      - name: Disparar análise
+      - name: Disparar analise
         env:
           API_URL: ${{ secrets.API_URL }}
         run: |
-          curl -X POST "${{ secrets.API_URL }}/api/v1/scrape/pipeline"
+          curl -X POST "$API_URL/api/v1/scrape/pipeline"
+          echo "Pipeline disparado!"
