@@ -68,28 +68,26 @@ class CaixaScraper(BaseScraper):
         return self._parse_csv(text, uf)
 
     def _parse_csv(self, text: str, uf: str) -> List[dict]:
-        results = []
-        lines = text.strip().split("\n")
+    results = []
+    lines = [l for l in text.split("\n") if l.strip()]  # Remove linhas vazias
 
-        # Linha 0: título, Linha 1: cabeçalho, Linha 2+: dados
-        if len(lines) < 3:
-            return []
+    if len(lines) < 2:
+        return []
 
-        # Detecta separador
-        header_line = lines[1]
-        sep = ";" if header_line.count(";") > header_line.count(",") else ","
+    # Linha 0: título, Linha 1: cabeçalho, Linha 2+: dados
+    sep = ";" if lines[1].count(";") > lines[1].count(",") else ","
 
-        reader = csv.DictReader(
-            io.StringIO("\n".join(lines[1:])),
-            delimiter=sep,
-        )
+    reader = csv.DictReader(
+        io.StringIO("\n".join(lines[1:])),
+        delimiter=sep,
+    )
 
-        for row in reader:
-            parsed = self._parse_row(row, uf)
-            if parsed:
-                results.append(parsed)
+    for row in reader:
+        parsed = self._parse_row(row, uf)
+        if parsed:
+            results.append(parsed)
 
-        return results
+    return results
 
     def _parse_row(self, row: dict, uf: str) -> Optional[dict]:
         try:
