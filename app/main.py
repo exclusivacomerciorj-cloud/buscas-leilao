@@ -410,7 +410,7 @@ async def import_caixa_csv(
     return {"imported": new_count, "total_found": len(raw_properties)}
     
     @app.delete("/api/v1/admin/reset-properties", tags=["admin"])
-def reset_properties(db: Session = Depends(get_db)):
+    def reset_properties(db: Session = Depends(get_db)):
     """Apaga todos os imóveis e análises para reimportação completa."""
     from app.models.property import PropertyAnalysis, Alert
     db.query(Alert).delete()
@@ -418,7 +418,7 @@ def reset_properties(db: Session = Depends(get_db)):
     db.query(Property).delete()
     db.commit()
     return {"message": "Banco limpo com sucesso"}
-    
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _serialize_property(prop: Property, analysis: Optional[PropertyAnalysis]) -> dict:
