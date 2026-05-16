@@ -324,17 +324,12 @@ def dispatch_alerts():
 
 @celery_app.task(name="app.tasks.worker.full_pipeline")
 def full_pipeline():
-    """
-    Encadeia todo o pipeline:
-    scrape_caixa → scrape_olx → analyze_all_pending → dispatch_alerts
-    """
-    from celery import chain, chord
+    """Pipeline completo: analise + alertas (scraping via GitHub Actions)."""
+    from celery import chain
 
-    logger.info("[Task/Pipeline] Iniciando pipeline completo...")
+    logger.info("[Task/Pipeline] Iniciando pipeline...")
 
     pipeline = chain(
-        scrape_caixa.s(),
-        scrape_olx.s(),
         analyze_all_pending.s(),
         dispatch_alerts.s(),
     )
