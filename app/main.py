@@ -43,6 +43,11 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     logger.info("🚀 Buscas Leilão API iniciando...")
     check_db_connection()
+    # Cria todas as tabelas automaticamente
+    from app.db.session import engine, Base
+    from app.models import property  # noqa
+    Base.metadata.create_all(bind=engine)
+    logger.info("✅ Tabelas criadas/verificadas")
     yield
     logger.info("API encerrada.")
 
