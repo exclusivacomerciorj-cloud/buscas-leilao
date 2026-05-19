@@ -137,7 +137,6 @@ def get_scrape_logs(
     ]
 
 
-@app.post("/api/v1/import/caixa", tags=["scraping"])
 @app.post("/api/v1/import/market", tags=["scraping"])
 async def import_market_properties(
     payload: dict,
@@ -190,6 +189,7 @@ async def import_market_properties(
 
     db.commit()
     return {"imported": new_count, "total": len(properties)}
+    @app.post("/api/v1/import/caixa", tags=["scraping"])
 async def import_caixa_csv(
     file: UploadFile,
     db: Session = Depends(get_db),
