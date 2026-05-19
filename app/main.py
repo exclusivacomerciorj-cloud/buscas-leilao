@@ -138,10 +138,63 @@ def get_scrape_logs(
 
 
 @app.post("/api/v1/import/caixa", tags=["scraping"])
+@app.post("/api/v1/import/market", tags=["scraping"])
+async def import_market_properties(
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Importa imoveis de mercado (OLX, ZAP) via JSON."""
+    from datetime import datetime
+
+    properties = payload.get("properties", [])
+    new_count = 0
+
+    for data in properties:
+        external_id = data.get("external_id")
+        source_str = data.get("source", "olx")
+        try:
+            source = PropertySource(source_str)
+        except Exception:
+            source = PropertySource.OLX
+
+        existing = None
+        if external_id:
+            existing = db.query(Property).filter(
+                Property.external_id == external_id,
+                Property.source == source,
+            ).first()
+
+        if existing:
+            existing.asking_price = data.get("asking_price", existing.asking_price)
+            from datetime import datetime
+            existing.last_seen_at = datetime.utcnow()
+        else:
+            from app.models.property import OccupationStatus, AuctionType, PropertyType
+            prop = Property(
+                source=source,
+                external_id=external_id,
+                source_url=data.get("source_url"),
+                title=data.get("title"),
+                neighborhood=data.get("neighborhood"),
+                city=data.get("city", "Rio De Janeiro"),
+                state=data.get("state", "RJ"),
+                asking_price=data.get("asking_price"),
+                total_area=data.get("total_area"),
+                usable_area=data.get("usable_area"),
+                bedrooms=data.get("bedrooms"),
+                auction_type=AuctionType.NAO_LEILAO,
+                occupation_status=OccupationStatus.DESOCUPADO,
+            )
+            db.add(prop)
+            new_count += 1
+
+    db.commit()
+    return {"imported": new_count, "total": len(properties)}
 async def import_caixa_csv(
     file: UploadFile,
     db: Session = Depends(get_db),
 ):
+
     """Importa CSV da Caixa enviado localmente."""
     from app.services.scrapers.caixa import CaixaScraper
     from datetime import datetime
