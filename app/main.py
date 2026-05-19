@@ -68,15 +68,11 @@ def health_detail(db: Session = Depends(get_db)):
         db.execute(__import__("sqlalchemy").text("SELECT 1"))
     except Exception:
         db_ok = False
-
     return {
         "api": "ok",
         "database": "ok" if db_ok else "error",
         "settings": {
             "openai_configured": bool(settings.OPENAI_API_KEY),
-            "whatsapp_configured": bool(settings.EVOLUTION_API_URL),
-            "email_configured": bool(settings.SMTP_USER),
-            "proxies_count": len(settings.proxies),
             "alert_min_score": settings.ALERT_MIN_SCORE,
         },
     }
@@ -120,7 +116,6 @@ def get_scrape_logs(
     if source:
         query = query.filter(ScrapeLog.source == source)
     logs = query.limit(limit).all()
-
     return [
         {
             "id": str(log.id),
@@ -137,64 +132,11 @@ def get_scrape_logs(
     ]
 
 
-@app.post("/api/v1/import/market", tags=["scraping"])
-async def import_market_properties(
-    payload: dict,
-    db: Session = Depends(get_db),
-):
-    """Importa imoveis de mercado (OLX, ZAP) via JSON."""
-    from datetime import datetime
-
-    properties = payload.get("properties", [])
-    new_count = 0
-
-    for data in properties:
-        external_id = data.get("external_id")
-        source_str = data.get("source", "olx")
-        try:
-            source = PropertySource(source_str)
-        except Exception:
-            source = PropertySource.OLX
-
-        existing = None
-        if external_id:
-            existing = db.query(Property).filter(
-                Property.external_id == external_id,
-                Property.source == source,
-            ).first()
-
-        if existing:
-            existing.asking_price = data.get("asking_price", existing.asking_price)
-            from datetime import datetime
-            existing.last_seen_at = datetime.utcnow()
-        else:
-            from app.models.property import OccupationStatus, AuctionType, PropertyType
-            prop = Property(
-                source=source,
-                external_id=external_id,
-                source_url=data.get("source_url"),
-                title=data.get("title"),
-                neighborhood=data.get("neighborhood"),
-                city=data.get("city", "Rio De Janeiro"),
-                state=data.get("state", "RJ"),
-                asking_price=data.get("asking_price"),
-                total_area=data.get("total_area"),
-                usable_area=data.get("usable_area"),
-                bedrooms=data.get("bedrooms"),
-                auction_type=AuctionType.NAO_LEILAO,
-                occupation_status=OccupationStatus.DESOCUPADO,
-            )
-            db.add(prop)
-            new_count += 1
-
-    db.commit()
-    return {"imported": new_count, "total": len(properties)}
-    @app.post("/api/v1/import/caixa", tags=["scraping"])
+@app.post("/api/v1/import/caixa", tags=["scraping"])
 async def import_caixa_csv(
     file: UploadFile,
     db: Session = Depends(get_db),
 ):
-
     """Importa CSV da Caixa enviado localmente."""
     from app.services.scrapers.caixa import CaixaScraper
     from datetime import datetime
@@ -232,8 +174,60 @@ async def import_caixa_csv(
     )
     db.add(log)
     db.commit()
-
     return {"imported": new_count, "total_found": len(raw_properties)}
+
+
+@app.post("/api/v1/import/market", tags=["scraping"])
+async def import_market_properties(
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Importa imoveis de mercado (OLX, ZAP, Apify) via JSON."""
+    from datetime import datetime
+    from app.models.property import OccupationStatus, AuctionType
+
+    properties = payload.get("properties", [])
+    new_count = 0
+
+    for data in properties:
+        external_id = data.get("external_id")
+        source_str = data.get("source", "olx")
+        try:
+            source = PropertySource(source_str)
+        except Exception:
+            source = PropertySource.OLX
+
+        existing = None
+        if external_id:
+            existing = db.query(Property).filter(
+                Property.external_id == external_id,
+                Property.source == source,
+            ).first()
+
+        if existing:
+            existing.asking_price = data.get("asking_price", existing.asking_price)
+            existing.last_seen_at = datetime.utcnow()
+        else:
+            prop = Property(
+                source=source,
+                external_id=external_id,
+                source_url=data.get("source_url"),
+                title=data.get("title"),
+                neighborhood=data.get("neighborhood"),
+                city=data.get("city", "Rio De Janeiro"),
+                state=data.get("state", "RJ"),
+                asking_price=data.get("asking_price"),
+                total_area=data.get("total_area"),
+                usable_area=data.get("usable_area"),
+                bedrooms=data.get("bedrooms"),
+                auction_type=AuctionType.NAO_LEILAO,
+                occupation_status=OccupationStatus.DESOCUPADO,
+            )
+            db.add(prop)
+            new_count += 1
+
+    db.commit()
+    return {"imported": new_count, "total": len(properties)}
 
 
 @app.delete("/api/v1/admin/reset-properties", tags=["admin"])
@@ -303,10 +297,7 @@ def list_properties(
         "total": total,
         "offset": offset,
         "limit": limit,
-        "properties": [
-            _serialize_property(prop, analysis)
-            for prop, analysis in results
-        ],
+        "properties": [_serialize_property(prop, analysis) for prop, analysis in results],
     }
 
 
@@ -320,9 +311,7 @@ def get_top_opportunities(
     ).filter(
         Property.status == PropertyStatus.ATIVO,
         PropertyAnalysis.opportunity_score >= 70,
-    ).order_by(
-        desc(PropertyAnalysis.opportunity_score)
-    ).limit(limit).all()
+    ).order_by(desc(PropertyAnalysis.opportunity_score)).limit(limit).all()
 
     return {
         "count": len(results),
@@ -354,7 +343,6 @@ def get_property(property_id: str, db: Session = Depends(get_db)):
         data["score_breakdown"] = analysis.score_breakdown
         data["legal_issues"] = analysis.legal_issues
         data["ai_summary"] = analysis.ai_summary
-
     return data
 
 
@@ -390,9 +378,7 @@ def get_property_report(property_id: str, db: Session = Depends(get_db)):
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="viabilidade_{property_id[:8]}.pdf"'
-        },
+        headers={"Content-Disposition": f'attachment; filename="viabilidade_{property_id[:8]}.pdf"'},
     )
 
 
