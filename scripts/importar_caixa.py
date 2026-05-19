@@ -1,6 +1,8 @@
 ﻿import requests
 import os
 import time
+import csv
+import io
 
 url = os.environ["API_URL"] + "/api/v1/import/caixa"
 print(f"Enviando para: {url}")
@@ -22,16 +24,7 @@ lines = [l for l in lines if l.strip()]
 print(f"Total linhas no CSV: {len(lines)}")
 
 header = lines[0:2]
-filtradas = []
-
-for l in lines[2:]:
-    partes = l.split(";")
-    if len(partes) > 3:
-        cidade = partes[2].strip()
-        bairro = partes[3].strip()
-        if cidade == "RIO DE JANEIRO" and bairro in BAIRROS_ALVO:
-            filtradas.append(l)
-
+filtradas = [l for l in lines[2:] if len(l.split(";")) > 3 and l.split(";")[2].strip() == "RIO DE JANEIRO" and l.split(";")[3].strip() in BAIRROS_ALVO]
 print(f"Imoveis nos bairros alvo: {len(filtradas)}")
 
 total = 0
