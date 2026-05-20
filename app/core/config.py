@@ -55,6 +55,7 @@ class Settings(BaseSettings):
 
     # Geocodificação
     GOOGLE_MAPS_API_KEY: Optional[str] = None
+    APIFY_API_KEY: str = ""
 
     @property
     def is_production(self) -> bool:

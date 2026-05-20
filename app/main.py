@@ -5,7 +5,7 @@ API principal — Buscas Leilão.
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Query, Response, UploadFile
+from fastapi import FastAPI, Depends, HTTPException, Query, Response, UploadFile, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
@@ -50,6 +50,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+BAIRROS_ALVO = {
+    "barra da tijuca", "jacarepagua", "jacarepaguá",
+    "recreio dos bandeirantes",
+    "freguesia (jacarepaguá)", "freguesia (jacarepagua)",
+    "itanhanga", "itanhangá", "curicica", "pechincha",
+    "taquara", "gardenia azul", "gardênia azul", "anil",
+    "botafogo", "copacabana", "gloria", "glória", "cosme velho",
+    "sao conrado", "são conrado", "tijuca", "andarai", "andaraí",
+    "grajau", "grajaú", "maracana", "maracanã",
+    "laranjeiras", "catete", "flamengo",
+}
+
 
 @app.get("/", tags=["status"])
 def health_check():
@@ -83,20 +95,6 @@ def trigger_caixa_scraping(ufs: Optional[list] = None):
     from app.tasks.worker import scrape_caixa
     task = scrape_caixa.delay(ufs=ufs or ["RJ"])
     return {"task_id": task.id, "status": "queued", "source": "caixa"}
-
-
-@app.post("/api/v1/scrape/olx", tags=["scraping"])
-def trigger_olx_scraping(neighborhoods: Optional[list] = None):
-    from app.tasks.worker import scrape_olx
-    task = scrape_olx.delay(neighborhoods=neighborhoods)
-    return {"task_id": task.id, "status": "queued", "source": "olx"}
-
-
-@app.post("/api/v1/scrape/zap", tags=["scraping"])
-def trigger_zap_scraping(neighborhoods: Optional[list] = None):
-    from app.tasks.zap import scrape_zap
-    task = scrape_zap.delay(neighborhoods=neighborhoods)
-    return {"task_id": task.id, "status": "queued", "source": "zap"}
 
 
 @app.post("/api/v1/scrape/pipeline", tags=["scraping"])
@@ -222,6 +220,7 @@ async def import_market_properties(
                 bedrooms=data.get("bedrooms"),
                 auction_type=AuctionType.NAO_LEILAO,
                 occupation_status=OccupationStatus.DESOCUPADO,
+                extra_data=data.get("extra_data", {}),
             )
             db.add(prop)
             new_count += 1
@@ -230,9 +229,129 @@ async def import_market_properties(
     return {"imported": new_count, "total": len(properties)}
 
 
+@app.post("/api/v1/webhook/apify", tags=["scraping"])
+async def apify_webhook(
+    payload: dict,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    Webhook chamado pelo Apify quando o scraper termina.
+    Busca os dados do dataset e importa automaticamente.
+    """
+    import httpx
+    from datetime import datetime
+    from app.models.property import OccupationStatus, AuctionType
+
+    logger.info(f"[Webhook/Apify] Recebido: {payload.get('eventType')}")
+
+    # Pega o ID do dataset do payload
+    resource = payload.get("resource", {})
+    dataset_id = resource.get("defaultDatasetId")
+
+    if not dataset_id:
+        logger.warning("[Webhook/Apify] Sem dataset ID no payload")
+        return {"status": "ignored", "reason": "no dataset_id"}
+
+    apify_key = settings.OPENAI_API_KEY  # Vamos usar variavel dedicada
+    # Busca os dados do Apify
+    apify_api_key = getattr(settings, 'APIFY_API_KEY', '')
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
+            params = {"format": "json", "clean": True}
+            headers = {"Authorization": f"Bearer {apify_api_key}"}
+            r = await client.get(url, params=params, headers=headers)
+            r.raise_for_status()
+            items = r.json()
+    except Exception as e:
+        logger.error(f"[Webhook/Apify] Erro ao buscar dataset: {e}")
+        return {"status": "error", "reason": str(e)}
+
+    logger.info(f"[Webhook/Apify] {len(items)} itens recebidos do dataset {dataset_id}")
+
+    # Filtra e importa
+    new_count = 0
+    total = 0
+
+    for item in items:
+        bairro = item.get("neighborhood", "").lower().strip()
+        if bairro not in BAIRROS_ALVO:
+            continue
+
+        price = item.get("price")
+        if not price or price < 10000:
+            continue
+
+        total += 1
+        external_id = str(item.get("id", ""))
+        source_str = item.get("source", "olx").lower()
+        if "zap" in source_str:
+            source = PropertySource.ZAP
+        else:
+            source = PropertySource.OLX
+
+        existing = None
+        if external_id:
+            existing = db.query(Property).filter(
+                Property.external_id == external_id,
+                Property.source == source,
+            ).first()
+
+        if existing:
+            existing.asking_price = float(price)
+            existing.last_seen_at = datetime.utcnow()
+        else:
+            area = item.get("area")
+            prop = Property(
+                source=source,
+                external_id=external_id,
+                source_url=item.get("url", ""),
+                title=item.get("title", ""),
+                neighborhood=item.get("neighborhood", ""),
+                city=item.get("city", "Rio De Janeiro"),
+                state="RJ",
+                asking_price=float(price),
+                total_area=float(area) if area else None,
+                usable_area=float(area) if area else None,
+                bedrooms=item.get("bedrooms"),
+                auction_type=AuctionType.NAO_LEILAO,
+                occupation_status=OccupationStatus.DESOCUPADO,
+                extra_data={
+                    "price_per_sqm": item.get("pricePerSqm"),
+                    "source_platform": item.get("source"),
+                    "condominium_fee": item.get("condominiumFee"),
+                    "iptu": item.get("iptu"),
+                },
+            )
+            db.add(prop)
+            new_count += 1
+
+    db.commit()
+    logger.info(f"[Webhook/Apify] Importados: {new_count} novos de {total} nos bairros alvo")
+
+    # Dispara análise em background
+    background_tasks.add_task(_trigger_pipeline)
+
+    return {
+        "status": "ok",
+        "dataset_id": dataset_id,
+        "total_received": len(items),
+        "in_target_neighborhoods": total,
+        "imported": new_count,
+    }
+
+
+async def _trigger_pipeline():
+    """Dispara o pipeline de análise após importação."""
+    from app.tasks.worker import full_pipeline
+    full_pipeline.delay()
+    logger.info("[Webhook/Apify] Pipeline de análise disparado")
+
+
 @app.delete("/api/v1/admin/reset-properties", tags=["admin"])
 def reset_properties(db: Session = Depends(get_db)):
-    """Apaga todos os imoveis para reimportacao."""
     from app.models.property import PropertyAnalysis, Alert
     db.query(Alert).delete()
     db.query(PropertyAnalysis).delete()
